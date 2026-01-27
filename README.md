@@ -11,7 +11,7 @@ DIP is a clean-room implementation of a PHP engine written in the **D programmin
 ## ⚡ Why DIP?
 
 * **Tiny Footprint:** Designed strictly for CLI and scripting usage. No web server bloat.
-* **Native Speed:** Built with D (LDC2) for high-performance native compilation.
+* **Native Speed:** Built with D for high-performance native compilation.
 * **Clean Room:** Written from scratch, learning from the language behavior rather than the source code.
 * **Modern Core:** Stack-based Virtual Machine architecture (planned).
 
