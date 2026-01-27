@@ -1,0 +1,11 @@
+{
+	"name": "dip",
+	"description": "A tiny engine for php",
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Fernando Dev",
+	"authors": [
+		"Fernando Dev"
+	],
+	"targetName": "dip",
+	"targetType": "executable"
+}
