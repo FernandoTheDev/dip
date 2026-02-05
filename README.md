@@ -6,7 +6,7 @@
 
 DIP is a clean-room implementation of a PHP engine written in the **D programming language**. It aims to be a lightweight, fast, and embeddable CLI alternative to the official Zend Engine, focusing on low overhead and easy FFI (Foreign Function Interface) integration.
 
-**Current Status:** 🚧 Work in Progress (Lexer Phase)
+**Current Status:** 🚧 Work in Progress (Virtual Machine Phase)
 
 ## ⚡ Why DIP?
 
@@ -18,9 +18,9 @@ DIP is a clean-room implementation of a PHP engine written in the **D programmin
 ## 🗺 Roadmap
 
 * [x] **Lexer:** Tokenization of keywords, strings, integers, and basic syntax.
-* [ ] **Parser:** AST (Abstract Syntax Tree) generation.
-* [ ] **Compiler:** Emitting bytecode (OpCodes).
-* [ ] **Virtual Machine:** Stack-based execution engine.
+* [x] **Parser:** AST (Abstract Syntax Tree) generation.
+* [X] **Compiler:** Emitting bytecode (OpCodes).
+* [X] **Virtual Machine:** Stack-based execution engine.
 * [ ] **Standard Library:** Basic IO and String manipulation.
 * [ ] **FFI:** Native C interop via D.
 
