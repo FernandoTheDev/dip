@@ -3,8 +3,10 @@ module hm;
 import core.stdc.stdlib : malloc, realloc, free;
 import core.stdc.string : memcpy, memset;
 
-struct HashMap(K, V) {
-    private struct Entry {
+struct HashMap(K, V)
+{
+    private struct Entry
+    {
         K key;
         V value;
         bool occupied;
@@ -18,43 +20,57 @@ struct HashMap(K, V) {
 
     @disable this(this); // Previne cópias acidentais
 
-    void initialize(size_t initialCapacity = 16) @nogc nothrow {
+    void initialize(size_t initialCapacity = 16) @nogc nothrow
+    {
         capacity = initialCapacity;
         length = 0;
         buckets = cast(Entry*) malloc(Entry.sizeof * capacity);
         memset(buckets, 0, Entry.sizeof * capacity);
     }
 
-    ~this() @nogc nothrow {
-        if (buckets) {
+    ~this() @nogc nothrow
+    {
+        if (buckets !is null)
+        {
             free(buckets);
             buckets = null;
         }
     }
 
-    private size_t hash(K key) const @nogc nothrow {
-        static if (is(K == string)) {
+    private size_t hash(K key) const @nogc nothrow
+    {
+        static if (is(K == string))
+        {
             size_t h = 5381;
-            foreach (c; key) h = ((h << 5) + h) + c;
+            foreach (c; key)
+                h = ((h << 5) + h) + c;
             return h;
-        } else
+        }
+        else
             return cast(size_t) key;
     }
 
-    private size_t findSlot(K key, out bool found) @nogc nothrow {
+    private size_t findSlot(K key, out bool found) @nogc nothrow
+    {
         size_t index = hash(key) % capacity;
         size_t firstDeleted = size_t.max;
 
-        for (size_t i = 0; i < capacity; i++) {
+        for (size_t i = 0; i < capacity; i++)
+        {
             size_t probe = (index + i) % capacity;
 
-            if (!buckets[probe].occupied) {
-                if (!buckets[probe].deleted) {
+            if (!buckets[probe].occupied)
+            {
+                if (!buckets[probe].deleted)
+                {
                     found = false;
                     return firstDeleted != size_t.max ? firstDeleted : probe;
-                } else if (firstDeleted == size_t.max)
+                }
+                else if (firstDeleted == size_t.max)
                     firstDeleted = probe;
-            } else if (buckets[probe].key == key) {
+            }
+            else if (buckets[probe].key == key)
+            {
                 found = true;
                 return probe;
             }
@@ -65,7 +81,8 @@ struct HashMap(K, V) {
     }
 
     // Redimensiona a tabela
-    private void resize() @nogc nothrow {
+    private void resize() @nogc nothrow
+    {
         size_t oldCapacity = capacity;
         Entry* oldBuckets = buckets;
 
@@ -82,10 +99,10 @@ struct HashMap(K, V) {
         free(oldBuckets);
     }
 
-    void put(K key, V value) @nogc nothrow {
-        if (cast(float)(length + 1) / capacity > LOAD_FACTOR) {
+    void put(K key, V value) @nogc nothrow
+    {
+        if (cast(float)(length + 1) / capacity > LOAD_FACTOR)
             resize();
-        }
 
         bool found;
         size_t index = findSlot(key, found);
@@ -102,7 +119,8 @@ struct HashMap(K, V) {
         buckets[index].deleted = false;
     }
 
-    V* get(K key) @nogc nothrow {
+    V* get(K key) @nogc nothrow
+    {
         bool found;
         size_t index = findSlot(key, found);
         if (found && !buckets[index].deleted)
@@ -110,11 +128,13 @@ struct HashMap(K, V) {
         return null;
     }
 
-    bool remove(K key) @nogc nothrow {
+    bool remove(K key) @nogc nothrow
+    {
         bool found;
         size_t index = findSlot(key, found);
 
-        if (found && !buckets[index].deleted) {
+        if (found && !buckets[index].deleted)
+        {
             buckets[index].deleted = true;
             length--;
             return true;
@@ -123,15 +143,18 @@ struct HashMap(K, V) {
         return false;
     }
 
-    bool contains(K key) @nogc nothrow {
+    bool contains(K key) @nogc nothrow
+    {
         return get(key) !is null;
     }
 
-    size_t size() const @nogc nothrow {
+    size_t size() const @nogc nothrow
+    {
         return length;
     }
 
-    void clear() @nogc nothrow {
+    void clear() @nogc nothrow
+    {
         memset(buckets, 0, Entry.sizeof * capacity);
         length = 0;
     }
