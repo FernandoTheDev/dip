@@ -1,10 +1,11 @@
-// TODO
 <?php
 
 $num = 60 + 9;
 
-if ($num === 69) {
-    echo "true";
+if ($num == 69.0) {
+    echo "true\n";
 } else {
-    echo "false";
+    echo "false\n";
 }
+
+echo "done\n";
