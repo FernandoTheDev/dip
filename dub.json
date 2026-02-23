@@ -7,5 +7,6 @@
 		"Fernando Dev"
 	],
 	"targetName": "dip",
-	"targetType": "executable"
+	"targetType": "executable",
+	"dflags": ["-O3", "--release"]
 }
