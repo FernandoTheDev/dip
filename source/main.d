@@ -6,7 +6,7 @@ import std.format;
 import std.conv;
 import std.path;
 import std.file;
-import core.stdc.stdlib : malloc, free;
+import core.stdc.stdlib : malloc, free, realloc;
 import core.stdc.string : memcpy;
 import runtime;
 import core.sys.posix.dlfcn;
@@ -94,6 +94,7 @@ enum TokenKind : ubyte
     Greater, // >
     LessEq, // <=
     GreaterEq, // >=
+    Arrow, // =>
 
     Eof, // \0
 }
@@ -473,6 +474,12 @@ public:
 
             if (ch == '=')
             {
+                if (peek() == '>')
+                {
+                    next();
+                    pushToken(makeStr(TokenKind.Arrow, "=>", loffset - 2, line));
+                    continue;
+                }
                 if (peek() == '=')
                 {
                     next();
@@ -513,12 +520,24 @@ public:
             }
             if (ch == '+')
             {
-                pushToken(makeStr(TokenKind.Plus, "+", loffset - 1, line));
+                if (peek() == '+')
+                {
+                    pushToken(makeStr(TokenKind.PlusPlus, "++", loffset - 2, line));
+                    offset++;
+                    loffset++;
+                } else
+                    pushToken(makeStr(TokenKind.Plus, "+", loffset - 1, line));
                 continue;
             }
             if (ch == '-')
             {
-                pushToken(makeStr(TokenKind.Minus, "-", loffset - 1, line));
+                if (peek() == '-')
+                {
+                    pushToken(makeStr(TokenKind.MinusMinus, "--", loffset - 2, line));
+                    offset++;
+                    loffset++;
+                } else
+                    pushToken(makeStr(TokenKind.Minus, "-", loffset - 1, line));
                 continue;
             }
             if (ch == '*')
@@ -646,9 +665,12 @@ enum NodeKind : ubyte
     FuncDecl,
     CallExpr,
     ReturnStmt,
-    // TODO:
-    ClassDecl,
     ArrayLit,
+    IndexExpr,
+    UnaryExpr,
+    // TODO:
+    TernaryExpr,
+    ClassDecl,
     SwitchStmt,
     ForStmt,
     ForEachStmt,
@@ -694,7 +716,7 @@ struct StringLit
 struct BinaryExpr
 {
     Node* right, left;
-    string op; // +, +=, /=, ...
+    TokenKind op; // +, +=, /=, ...
 }
 
 struct EchoStmt
@@ -748,6 +770,27 @@ struct CallExpr
     FnArgument[] arguments;
 }
 
+struct ArrayLit {
+    Node*[Node*] elements;
+}
+
+struct IndexExpr {
+    Node* left;
+    Node* idx;
+}
+
+struct UnaryExpr {
+    TokenKind op;
+    Node* left;
+    bool postfix; // i++ ++i
+}
+
+struct TernaryExpr {
+    Node* cond;
+    Node* v1;
+    Node* v2;
+}
+
 struct Node
 {
     NodeKind kind;
@@ -755,20 +798,29 @@ struct Node
     union
     {
         Program program;
-        AssignDecl assignDecl;
-        BinaryExpr binaryExpr;
+
         Identifier identifier;
         DIdentifier didentifier;
+
         IntLit intLit;
         FloatLit floatLit;
         StringLit strLit;
+        ArrayLit arrLit;
+
+        FnDecl fn;
+        AssignDecl assignDecl;
+
+        BinaryExpr binaryExpr;
+        CallExpr call;
+        IndexExpr idxExpr;
+        UnaryExpr unary;
+        TernaryExpr ternary;
+
         EchoStmt echo;
         BlockStmt block;
         IfStmt ifStmt;
         WhileStmt whileStmt;
-        FnDecl fn;
         ReturnStmt returnStmt;
-        CallExpr call;
     }
 }
 
@@ -777,6 +829,7 @@ struct Node
 enum Precedence : ubyte
 {
     Low,
+    Ternary,
     Assign, // =, +=, ...
     Sum, // +, -
     Mul, // *, /, %
@@ -978,6 +1031,47 @@ struct ParseExpression
             enforce(parser.match([TokenKind.RParen]), "Expected ')' after expr.");
             return n;
             break;
+        case TokenKind.Plus:
+        case TokenKind.PlusPlus:
+        case TokenKind.Minus:
+        case TokenKind.MinusMinus:
+            TokenKind op = parser.tokens[parser.offset-1].kind;
+            return unaryExpr(parse(Precedence.Highest), false, op);
+        case TokenKind.LBracket:
+            Node* n = new Node();
+            n.kind = NodeKind.ArrayLit;
+            Node*[Node*] elements;
+            pragma(inline, true)
+            Node* makeInt(long n)
+            {
+                Node* nd = new Node();
+                nd.kind = NodeKind.IntLit;
+                nd.intLit.value = n;
+                return nd;
+            }
+            long count = 0;
+            while (!parser.match([TokenKind.RBracket]) && !parser.isAtEnd())
+            {
+                Node* p1 = parse();
+                Node* p2;
+                if (parser.match([TokenKind.Arrow]))
+                {
+                    p2 = parse();
+                    if (p1.kind == NodeKind.IntLit)
+                        if (p1.intLit.value > count)
+                            count = p1.intLit.value + 1;
+                }
+                else
+                {
+                    p2 = p1;
+                    p1 = makeInt(count++);
+                }
+                elements[p1] = p2;
+                if (!parser.check(TokenKind.RBracket))
+                    parser.consume(TokenKind.Comma, "Expected ',' after the element.");
+            }
+            n.arrLit.elements = elements;
+            return n;
         default:
             writeln(tk);
             throw new Exception("Unknown token.");
@@ -987,7 +1081,7 @@ struct ParseExpression
     Node* binaryExpr(Node* left)
     {
         ubyte level = peekPrecedence(parser.peek());
-        string op = parser.advance().value.str;
+        TokenKind op = parser.advance().kind;
         Node* n = new Node();
         n.kind = NodeKind.BinaryExpr;
         n.binaryExpr.left = left;
@@ -1028,6 +1122,43 @@ struct ParseExpression
         return n;
     }
 
+    Node* indexExpr(Node* left)
+    {
+        parser.advance();
+        Node* n = new Node();
+        n.kind = NodeKind.IndexExpr;
+        n.idxExpr.left = left;
+        n.idxExpr.idx = null;
+        if (!parser.match([TokenKind.RBracket]))
+        {
+            n.idxExpr.idx = parse();
+            parser.consume(TokenKind.RBracket, "Expected ']' after index access.");
+        }
+        return n;
+    }
+
+    Node* unaryExpr(Node* left, bool post, TokenKind op)
+    {
+        Node* n = new Node();
+        n.kind = NodeKind.UnaryExpr;
+        n.unary.postfix = post;
+        n.unary.op = op;
+        n.unary.left = left;
+        return n;
+    }
+
+    Node* ternaryExpr(Node* left)
+    {
+        parser.advance();
+        Node* n = new Node();
+        n.kind = NodeKind.TernaryExpr;
+        n.ternary.cond = left;
+        n.ternary.v1 = parse();
+        parser.consume(TokenKind.Colon, "Expected ':' after ternary.");
+        n.ternary.v2 = parse();
+        return n;
+    }
+
     Node* infix(Node* left)
     {
         switch (parser.peek().kind)
@@ -1043,11 +1174,20 @@ struct ParseExpression
         case TokenKind.LessEq:
         case TokenKind.EEEquals:
         case TokenKind.EEquals:
+        case TokenKind.Dot:
             return binaryExpr(left);
         case TokenKind.Equals:
             return assignDecl(left);
         case TokenKind.LParen:
             return callExpr(left);
+        case TokenKind.LBracket:
+            return indexExpr(left);
+        // postfix
+        case TokenKind.PlusPlus:
+        case TokenKind.MinusMinus:
+            return unaryExpr(left, true, parser.advance().kind);
+        case TokenKind.Question:
+            return ternaryExpr(left);
         default:
             return left;
         }
@@ -1057,8 +1197,13 @@ struct ParseExpression
     {
         switch (tk.kind)
         {
+        case TokenKind.Question:
+            return Precedence.Ternary;
         case TokenKind.Plus:
+        case TokenKind.PlusPlus:
         case TokenKind.Minus:
+        case TokenKind.MinusMinus:
+        case TokenKind.Dot:
             return Precedence.Sum;
         case TokenKind.Star:
         case TokenKind.Slash:
@@ -1073,6 +1218,7 @@ struct ParseExpression
         case TokenKind.Equals:
             return Precedence.Assign;
         case TokenKind.LParen:
+        case TokenKind.LBracket:
             return Precedence.Call;
         default:
             return Precedence.Low;
@@ -1262,9 +1408,10 @@ struct Compiler
     uint[] instructions;
     HVMValue* pool;
     uint poolSz = 0;
+    uint poolCap = 64;
     uint[string] stringCache;
     bool[string] ffiFunctions;
-
+    
     Label[string] labels;
     string label = "main"; // current label
     uint labelCounter;
@@ -1272,7 +1419,19 @@ struct Compiler
     this(Node* program)
     {
         this.program = program;
-        this.pool = cast(HVMValue*) malloc(HVMValue.sizeof * 64);
+        this.pool = cast(HVMValue*) malloc(HVMValue.sizeof * poolCap);
+    }
+
+    pragma(inline, true)
+    void checkPool()
+    {
+        if (poolSz >= poolCap)
+        {
+            poolCap *= 2;
+            HVMValue* newPool = cast(HVMValue*) realloc(pool, HVMValue.sizeof * poolCap);
+            enforce(newPool !is null, "Failed to realloc constant pool.");
+            pool = newPool;
+        }
     }
 
     pragma(inline, true);
@@ -1337,6 +1496,7 @@ struct Compiler
         memcpy(strCopy, str.ptr, str.length);
         strCopy[str.length] = '\0';
 
+        checkPool();
         pool[poolSz++] = HVMValue.makeString(strCopy, cast(uint) str.length);
         stringCache[key] = idx;
 
@@ -1350,10 +1510,80 @@ struct Compiler
         push(encode_a(HVMOpCode.Load));
     }
 
+    // void compileAssignDecl(Node* node)
+    // {
+    //     // val
+    //     compile(node.assignDecl.value);
+    //     Node* target = node.assignDecl.target;
+
+    //     void compileAssignIdx(Node* idx)
+    //     {
+    //         if (idx.kind == NodeKind.IndexExpr)
+    //         {
+    //             // arr
+    //             if (idx.idxExpr.idx !is null)
+    //             {
+    //                 compile(idx.idxExpr.left);
+    //                 // idx
+    //                 compile(idx.idxExpr.idx);
+    //                 // idx arr val
+    //                 push(encode_a(HVMOpCode.SetArr));
+    //             } else
+    //             {
+    //                 if (idx.idxExpr.left.kind == NodeKind.IndexExpr)
+    //                     compileAssignIdx(idx.idxExpr.left);
+    //                 else
+    //                     compile(idx.idxExpr.left);
+    //                 // arr val
+    //                 push(encode_a(HVMOpCode.PushArr));
+    //             }
+    //             return;
+    //         }
+    //     }
+
+    //     if (target.kind == NodeKind.IndexExpr)
+    //     {
+    //         compileAssignIdx(target);
+    //         return;
+    //     }
+
+    //     ushort idx = internString(target.didentifier.value);
+    //     push(encode_a(HVMOpCode.Loadk, idx));
+    //     push(encode_abc(HVMOpCode.Store));
+    // }
     void compileAssignDecl(Node* node)
     {
         compile(node.assignDecl.value);
         Node* target = node.assignDecl.target;
+
+        void compileAssignIdx(Node* idx, bool isTarget)
+        {
+            if (idx.kind == NodeKind.IndexExpr)
+            {
+                if (idx.idxExpr.left.kind == NodeKind.IndexExpr)
+                    compileAssignIdx(idx.idxExpr.left, false);
+                else
+                    compile(idx.idxExpr.left);
+
+                if (idx.idxExpr.idx !is null)
+                {
+                    compile(idx.idxExpr.idx);
+                    if (isTarget)
+                        push(encode_a(HVMOpCode.SetArr));
+                    else
+                        push(encode_a(HVMOpCode.FetchDimM)); 
+                } 
+                else 
+                    push(encode_a(HVMOpCode.PushArr));
+                return;
+            }
+        }
+
+        if (target.kind == NodeKind.IndexExpr)
+        {
+            compileAssignIdx(target, true);
+            return;
+        }
 
         ushort idx = internString(target.didentifier.value);
         push(encode_a(HVMOpCode.Loadk, idx));
@@ -1369,6 +1599,7 @@ struct Compiler
     void compileIntLit(Node* node)
     {
         ushort idx = cast(ushort) poolSz;
+        checkPool();
         pool[poolSz++] = HVMValue.makeInt(node.intLit.value);
         push(encode_a(HVMOpCode.Loadk, idx));
     }
@@ -1376,6 +1607,7 @@ struct Compiler
     void compileFloatLit(Node* node)
     {
         ushort idx = cast(ushort) poolSz;
+        checkPool();
         pool[poolSz++] = HVMValue.makeFloat(node.floatLit.value);
         push(encode_a(HVMOpCode.Loadk, idx));
     }
@@ -1388,24 +1620,26 @@ struct Compiler
 
     void compileBinaryExpr(Node* node)
     {
-        string op = node.binaryExpr.op;
+        TokenKind op = node.binaryExpr.op;
         compile(node.binaryExpr.right);
         compile(node.binaryExpr.left);
         ubyte opcode = HVMOpCode.Add;
-        if (op == "+")
+        if (op == TokenKind.Plus)
             opcode = HVMOpCode.Add;
-        else if (op == "-")
+        else if (op == TokenKind.Minus)
             opcode = HVMOpCode.Sub;
-        else if (op == "*")
+        else if (op == TokenKind.Star)
             opcode = HVMOpCode.Mul;
-        else if (op == "/")
+        else if (op == TokenKind.Slash)
             opcode = HVMOpCode.Div;
-        else if (op == "%")
+        else if (op == TokenKind.Modulo)
             opcode = HVMOpCode.Mod;
-        else if (op == "==")
+        else if (op == TokenKind.EEquals)
             opcode = HVMOpCode.Eq;
-        else if (op == "<")
+        else if (op == TokenKind.Less)
             opcode = HVMOpCode.Lt;
+        else if (op == TokenKind.Dot)
+            opcode = HVMOpCode.Dot;
         push(encode_abc(opcode));
     }
 
@@ -1498,6 +1732,7 @@ struct Compiler
 
         // Se não houver return explícito, retorna 0
         push(encode_a(HVMOpCode.Loadk, cast(ushort) poolSz));
+        checkPool();
         pool[poolSz++] = HVMValue.makeInt(0);
         push(encode_abc(HVMOpCode.Ret));
 
@@ -1550,10 +1785,108 @@ struct Compiler
         {
             // Return sem valor - empilha 0
             push(encode_a(HVMOpCode.Loadk, cast(ushort) poolSz));
+            checkPool();
             pool[poolSz++] = HVMValue.makeInt(0);
         }
 
         push(encode_abc(HVMOpCode.Ret));
+    }
+
+    Node* castToInt(Node* node)
+    {
+        if (node.kind == NodeKind.FloatLit)
+        {
+            node.kind = NodeKind.IntLit;
+            node.intLit.value = to!long(node.floatLit.value);
+            return node;
+        }
+        return node;
+    }
+
+    void compileArrayLit(Node* node)
+    {
+        push(encode_a(HVMOpCode.NewArr));
+        foreach (const Node* key, Node* val; node.arrLit.elements)
+        {
+            compile(val);
+            compile(castToInt(cast(Node*)key));
+            push(encode_a(HVMOpCode.AddArr));
+        }
+    }
+
+    void compileIndexExpr(Node* node)
+    {
+        compile(node.idxExpr.left);
+        compile(castToInt(node.idxExpr.idx));
+        push(encode_a(HVMOpCode.FetchDim));
+    }
+
+    pragma(inline, true)
+    Node* makeInt(long n)
+    {
+        Node* nd = new Node();
+        nd.kind = NodeKind.IntLit;
+        nd.intLit.value = n;
+        return nd;
+    }
+
+    void compileUnaryExpr(Node* node)
+    {
+        void storeLeft(Node* node)
+        {
+            // $i
+            if (node.kind == NodeKind.DIdentifier)
+            {
+                push(encode_a(HVMOpCode.Loadk, internString(node.didentifier.value)));
+                push(encode_a(HVMOpCode.Store));
+                return;
+            }
+            // $arr[idx]
+            if (node.kind == NodeKind.IndexExpr)
+            {
+                compile(node.idxExpr.left);
+                compile(node.idxExpr.idx);
+                push(encode_a(HVMOpCode.SetArr));
+                return;
+            }
+        }
+        TokenKind op = node.unary.op;
+        if (op == TokenKind.Plus) return;
+        if (op == TokenKind.Minus)
+        {
+            compile(node.unary.left);
+            compile(makeInt(0));
+            push(encode_abc(HVMOpCode.Sub));
+            return;
+        }
+        if (op == TokenKind.MinusMinus || op == TokenKind.PlusPlus)
+        {
+            if (node.unary.postfix)
+                compile(node.unary.left);
+            compile(makeInt(1));
+            compile(node.unary.left);
+            push(encode_abc(op == TokenKind.PlusPlus ? HVMOpCode.Add : HVMOpCode.Sub));
+            storeLeft(node.unary.left);
+            if (!node.unary.postfix)
+                compile(node.unary.left);
+        }
+    }
+
+    void compileTernaryExpr(Node* node)
+    {
+        string elseLabel = makeLabel();
+        string endLabel = makeLabel();
+
+        compile(node.ternary.cond);
+        emitJump(HVMOpCode.Jz, elseLabel); 
+
+        compile(node.ternary.v1);
+        emitJump(HVMOpCode.Jmp, endLabel);
+
+        defineLabel(elseLabel);
+        compile(node.ternary.v2);
+
+        defineLabel(endLabel);
     }
 
     void compile(Node* node)
@@ -1601,6 +1934,18 @@ struct Compiler
             break;
         case NodeKind.CallExpr:
             compileCallExpr(node);
+            break;
+        case NodeKind.ArrayLit:
+            compileArrayLit(node);
+            break;
+        case NodeKind.IndexExpr:
+            compileIndexExpr(node);
+            break;
+        case NodeKind.UnaryExpr:
+            compileUnaryExpr(node);
+            break;
+        case NodeKind.TernaryExpr:
+            compileTernaryExpr(node);
             break;
         default:
             writeln(node.kind);
@@ -1691,16 +2036,22 @@ void main(string[] args)
         foreach (k, v; p)
             prog[k] = v;
 
-        HVM* vm = HVM_create(prog, cast(uint) p.length, compiler.pool, compiler.poolSz, false);
+        HVM* vm = HVM_create(prog, cast(uint) p.length, compiler.pool, compiler.poolSz, true);
         vm.run();
-        free(vm);
+        
+        if (compiler.pool !is null)
+        {
+            for (uint i = 0; i < compiler.poolSz; i++)
+                if (compiler.pool[i].type == HVMType.String)
+                    free(compiler.pool[i].value.str.value);
+        }
 
+        vm.clear();
+        free(vm);
+        free(FFI_FUNCTIONS.buckets);
+        
         for (ubyte i; i < handlersSz; i++)
             dlclose(HANDLERS[i]);
-
-        scope (exit)
-            if (compiler.pool !is null)
-                free(compiler.pool);
     }
     catch (Exception e)
     {

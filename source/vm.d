@@ -3,10 +3,11 @@ module vm;
 @nogc:
 extern (C):
 
-import core.stdc.stdio, core.stdc.stdlib;
+import core.stdc.stdio, core.stdc.stdlib, core.stdc.string;
 import hm;
 import runtime;
 import main;
+import ahm;
 
 alias FFI_FUNCTION = HVMValue function(HVMValue*, uint argc);
 
@@ -17,22 +18,20 @@ enum HVMType : ubyte
     Int, //       i64 8 bytes
     Float, //     f64 8 bytes
     String, //    struct HVMString
-    HashTable, // struct HVMHashTable
-    Object, //    struct HVMObject
+    Array,
 }
 
 struct HVMString
 {
     char* value;
     uint length;
+    uint* refCount;
 }
 
-struct HVMHashTable
+struct HVMArray
 {
-}
-
-struct HVMObject
-{
+    ArrayHashMap map;
+    uint* refCount;
 }
 
 union HVMLiteral
@@ -42,8 +41,7 @@ union HVMLiteral
     bool i1;
     double f32;
     HVMString str;
-    HVMHashTable ht;
-    HVMObject obj;
+    HVMArray* arr;
 }
 
 struct HVMValue
@@ -87,10 +85,10 @@ struct HVMValue
 
     pragma(inline, true)
     pragma(mangle, "HVMValue_makeString")
-    static HVMValue makeString(char* str, uint len)
+    static HVMValue makeString(char* str, uint len, uint* refCount = null)
     {
         HVMValue v = HVMValue(HVMType.String);
-        v.value.str = HVMString(str, len);
+        v.value.str = HVMString(str, len, refCount);
         return v;
     }
 
@@ -100,6 +98,15 @@ struct HVMValue
     {
         HVMValue v = HVMValue(HVMType.Float);
         v.value.f32 = n;
+        return v;
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVMValue_makeArray")
+    static HVMValue makeArray(HVMArray* arr)
+    {
+        HVMValue v = HVMValue(HVMType.Array);
+        v.value.arr = arr;
         return v;
     }
 }
@@ -116,6 +123,8 @@ enum HVMOpCode : ubyte
     Callf, // chamada em função ffi
     Ret, // retorna pro `pc` anterior
     Echo,
+    Dup,
+    Dot, // concat
 
     // genericos pra qualquer tipo prevalecendo o tipo maior, suportam fastPath para operações com o mesmo tipo
     // prefixo B indica BitWise
@@ -133,7 +142,7 @@ enum HVMOpCode : ubyte
     Bor, // |
     BNot, // ~
 
-    Jmp,
+    Jmp, // 22
     Jz, //  jmp if zero (false)
     Jnz, // jmp if not zero (true)
     // toda condição retorna um bool que pode ser 1 ou 0 (true ou false)
@@ -143,6 +152,14 @@ enum HVMOpCode : ubyte
     Gte, // >=
     Eq, // ==
     Neq, // !=
+
+    // Arrays
+    NewArr, // $x = [];
+    AddArr, // $x[idx] = ...;
+    SetArr, // $x[idx] = ...;
+    FetchDim, // $x[idx]
+    FetchDimM,
+    PushArr, // $x[] = ...;
 
     Hlt, // Halt
 }
@@ -161,11 +178,11 @@ struct HVM
     uint programSize; // tamanho do programa
     HVMValue* constantPool; // mapa de constantes
     uint constantPoolSize; // tamanho do mapa de constantes
-    ubyte STACK_LIMIT = 255;
-    HVMValue[255] stack = []; // a pilha do programa
+    HVMValue* stack;
+    uint stackAllc;
     uint stackSize;
     HashMap!(string, HVMValue)* context;
-    FrameCall[255] callStack;
+    FrameCall[1024] callStack;
     uint callStackSize = 0;
     bool clean = true;
 
@@ -197,13 +214,26 @@ struct HVM
             if (constantPool !is null)
                 free(constantPool);
         }
-
+            
         for (uint i = 0; i < callStackSize; i++)
             if (callStack[i].localContext !is null)
+            {
+                callStack[i].localContext.releaseAll();
                 free(callStack[i].localContext);
-
+            }
+        
         if (context !is null)
+        {
+            context.releaseAll();
+            free(context.buckets);
             free(context);
+        }
+
+        for (uint i = 0; i < stackSize; i++)
+            release(stack[i]);
+
+        if (stack !is null)
+            free(stack);
     }
 
     pragma(inline, true)
@@ -212,6 +242,15 @@ struct HVM
     {
         printf("HVM Internal error: %s", cast(const char*) msg);
         exit(EXIT_FAILURE);
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_peek")
+    HVMValue peek()
+    {
+        if (stackSize < 1)
+            this.error("Stack empty.");
+        return stack[stackSize];
     }
 
     pragma(inline, true)
@@ -227,8 +266,11 @@ struct HVM
     pragma(mangle, "HVM_push")
     void push(HVMValue val)
     {
-        if (stackSize == STACK_LIMIT)
-            this.error("Stack Overflow.");
+        if (stackSize == stackAllc)
+        {
+            stackAllc *= 2;
+            stack = cast(HVMValue*) realloc(stack, stackAllc * HVMValue.sizeof);
+        }
         stack[stackSize++] = val;
     }
 
@@ -298,6 +340,30 @@ struct HVM
             case HVMOpCode.Ret:
                 opRet();
                 continue;
+            case HVMOpCode.NewArr:
+                opNewArr();
+                continue;
+            case HVMOpCode.AddArr:
+                opAddArr();
+                continue;
+            case HVMOpCode.SetArr:
+                opSetArr();
+                continue;
+            case HVMOpCode.FetchDim:
+                opFetchDim();
+                continue;
+            case HVMOpCode.PushArr:
+                opPushArr();
+                continue;
+            case HVMOpCode.Dup:
+                opDup();
+                continue;
+            case HVMOpCode.Dot:
+                opDot();
+                continue;
+            case HVMOpCode.FetchDimM:
+                opFetchDimM();
+                continue;
 
             case HVMOpCode.BShl:
             case HVMOpCode.BShll:
@@ -318,6 +384,314 @@ struct HVM
             }
         }
     }
+    
+    // pragma(inline, true)
+    // pragma(mangle, "HVM_opDot")
+    // void opDot()
+    // {
+    //     HVMValue l = pop();
+    //     HVMValue r = pop();
+    
+    //     HVMString s1 = valueToString(l);
+    //     HVMString s2 = valueToString(r);
+    
+    //     uint totalLen = s1.length + s2.length;
+    //     char* newBuf = cast(char*) malloc(totalLen + 1);
+    //     uint* counter = cast(uint*) malloc(uint.sizeof);
+    //     *counter = 1;
+    
+    //     memcpy(newBuf, s1.value, s1.length);
+    //     memcpy(newBuf + s1.length, s2.value, s2.length);
+    //     newBuf[totalLen] = '\0';
+    
+    //     // libera as temporárias se forem dinâmicas
+    //     if (s1.refCount !is null && s1.refCount != l.value.str.refCount)
+    //         release(HVMValue.makeString(s1.value, s1.length, s1.refCount));
+    //     if (s2.refCount !is null && s2.refCount != r.value.str.refCount)
+    //         release(HVMValue.makeString(s2.value, s2.length, s2.refCount));
+        
+    //     release(l);
+    //     release(r);
+    
+    //     push(HVMValue.makeString(newBuf, totalLen, counter));
+    // }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opFetchDimM")
+    void opFetchDimM()
+    {
+        HVMValue key = pop();
+        HVMValue arrVal = pop();
+
+        if (arrVal.type != HVMType.Array)
+            error("Attempting to auto-create index on non-array value.");
+
+        HVMArray* arr = arrVal.value.arr;
+        long k;
+
+        if (key.type == HVMType.String)
+        {
+            k = 5381;
+            HVMString s = key.value.str;
+            string str = cast(string) s.value[0 .. s.length];
+            foreach (c; str)
+                k = ((k << 5) + k) + c;
+        }
+        else
+            k = toInt(key).value.i32;
+
+        HVMValue* found = arr.map.get(k);
+
+        if (found !is null)
+        {
+            if (found.type != HVMType.Array)
+                 error("Cannot auto-vivify: path contains non-array value.");
+
+            retain(*found);
+            push(*found);
+        }
+        else
+        {
+            HVMArray* newArrPtr = cast(HVMArray*) calloc(1, HVMArray.sizeof);
+            if (newArrPtr is null) error("Out of memory autovivifying array");
+            newArrPtr.map.initialize(8);
+
+            newArrPtr.refCount = cast(uint*) malloc(uint.sizeof);
+            *newArrPtr.refCount = 1;
+
+            HVMValue newArrVal = HVMValue.makeArray(newArrPtr);
+
+            arr.map.put(k, newArrVal);
+            retain(newArrVal); 
+            push(newArrVal);
+        }
+        release(key);
+        release(arrVal);
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opDot")
+    void opDot()
+    {
+        HVMValue r = pop();
+        HVMValue l = pop();
+
+        if (l.type == HVMType.String && l.value.str.length == 0)
+        {
+            release(l);
+            push(r);
+            return;
+        }
+        if (r.type == HVMType.String && r.value.str.length == 0)
+        {
+            release(r);
+            push(l);
+            return;
+        }
+
+        HVMString s1 = valueToString(l);
+        HVMString s2 = valueToString(r);
+
+        uint totalLen = s1.length + s2.length;
+
+        char* newBuf = cast(char*) malloc(totalLen + 1);
+        if (newBuf is null)
+            error("Out of memory in string concatenation");
+
+        uint* counter = cast(uint*) malloc(uint.sizeof);
+        if (counter is null)
+        {
+            free(newBuf);
+            error("Out of memory allocating ref counter");
+        }
+        *counter = 1;
+
+        memcpy(newBuf, s1.value, s1.length);
+        memcpy(newBuf + s1.length, s2.value, s2.length);
+        newBuf[totalLen] = '\0';
+    
+        bool s1IsTemp = (l.type != HVMType.String || s1.value != l.value.str.value);
+        bool s2IsTemp = (r.type != HVMType.String || s2.value != r.value.str.value);
+
+        if (s1IsTemp && s1.refCount !is null)
+        {
+            if (--(*s1.refCount) == 0)
+            {
+                free(s1.value);
+                free(s1.refCount);
+            }
+        }
+
+        if (s2IsTemp && s2.refCount !is null)
+        {
+            if (--(*s2.refCount) == 0)
+            {
+                free(s2.value);
+                free(s2.refCount);
+            }
+        }
+
+        release(l);
+        release(r);
+
+        push(HVMValue.makeString(newBuf, totalLen, counter));
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opDup")
+    void opDup()
+    {
+        push(peek());
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opPushArr")
+    void opPushArr()
+    {
+        HVMValue arrVal = pop();
+        HVMValue val = pop();
+
+        if (arrVal.type != HVMType.Array)
+            error("Attempting to access an array from a non-array array.");
+
+        HVMArray* arr = arrVal.value.arr;
+        arr.map.append(val);
+        release(arrVal);
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opNewArr")
+    void opNewArr()
+    {
+        HVMArray* arr = cast(HVMArray*) calloc(1, HVMArray.sizeof);
+        if (arr is null) error("Out of memory");
+        
+        arr.map.initialize(8);    
+        arr.refCount = cast(uint*) malloc(uint.sizeof);
+        *arr.refCount = 1;
+
+        push(HVMValue.makeArray(arr));
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opAddArr")
+    void opAddArr()
+    {
+        HVMValue key = pop();
+        HVMValue val = pop();
+        HVMValue arrVal = pop();
+
+        if (arrVal.type != HVMType.Array)
+        {
+            printf("ERROR: Expected Array (5), received Type (%d)\n", arrVal.type);
+            exit(1);
+        }
+
+        HVMArray* arr = arrVal.value.arr;
+        if (arr is null)
+        {
+            printf("ERROR: Array pointer is NULL\n");
+            exit(1);
+        }
+
+        long k;
+        if (key.type == HVMType.String)
+        {
+            k = 5381;
+            HVMString s = key.value.str;
+            string str = cast(string) s.value[0 .. s.length];
+            foreach (c; str)
+                k = ((k << 5) + k) + c;
+        }
+        else
+            k = toInt(key).value.i32;
+
+        // arr.map.put(k, val);
+
+        HVMValue* oldVal = arr.map.get(k);
+        if (oldVal !is null)
+            release(*oldVal);
+
+        retain(val);
+        arr.map.put(k, val);
+
+        release(key);
+        push(arrVal);
+    }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opSetArr")
+    void opSetArr()
+    {
+        HVMValue key = pop();
+        HVMValue arrVal = pop();
+        HVMValue val = pop();
+
+        if (arrVal.type != HVMType.Array)
+            error("Attempting to access an array from a non-array array.");
+
+        HVMArray* arr = arrVal.value.arr;
+        long k;
+        if (key.type == HVMType.String)
+        {
+            k = 5381;
+            HVMString s = key.value.str;
+            string str = cast(string) s.value[0 .. s.length];
+            foreach (c; str)
+                k = ((k << 5) + k) + c;
+        }
+        else
+            k = toInt(key).value.i32;
+
+        HVMValue* old = arr.map.get(k);
+        if (old !is null)
+            release(*old);
+        
+        retain(val);
+        arr.map.put(k, val);
+        
+        release(key);
+        release(arrVal);
+     }
+
+    pragma(inline, true)
+    pragma(mangle, "HVM_opFetchDim")
+    void opFetchDim()
+    {
+        HVMValue key = pop();
+        HVMValue arrVal = pop();
+
+        if (arrVal.type != HVMType.Array)
+            error("Attempting to access an array from a non-array array.");
+
+        HVMArray* arr = arrVal.value.arr;
+        long k;
+        if (key.type == HVMType.String)
+        {
+            k = 5381;
+            HVMString s = key.value.str;
+            string str = cast(string) s.value[0 .. s.length];
+            foreach (c; str)
+                k = ((k << 5) + k) + c;
+        }
+        else
+            k = toInt(key).value.i32;
+
+        HVMValue* found = arr.map.get(k);
+        if (found !is null)
+        {
+            retain(*found);
+            push(*found);
+        }
+        else
+        {
+            // PHP retorna NULL e emite um Warning se a chave não existe
+            printf("Warning: Undefined array key %lld\n", k);
+            push(HVMValue.init);
+        }
+        release(key);
+        release(arrVal);
+    }
 
     pragma(inline, true)
     pragma(mangle, "HVM_opCallf")
@@ -327,18 +701,18 @@ struct HVM
         check(funcName.type == HVMType.String, "Function name must be string");
 
         HVMString str = funcName.value.str;
-        string name = cast(string)str.value[0..str.length];
+        string name = cast(string) str.value[0 .. str.length];
         FN_FFI* fn = FFI_FUNCTIONS.get(name);
         check(fn !is null, "FFI function not found");
 
-        HVMValue[16] staticBuffer; 
+        HVMValue[16] staticBuffer;
         HVMValue* args;
 
         if (argc <= 16)
             args = staticBuffer.ptr;
         else
             args = cast(HVMValue*) malloc(HVMValue.sizeof * argc);
-        
+
         for (int i = argc - 1; i >= 0; i--)
             args[i] = pop();
 
@@ -358,7 +732,7 @@ struct HVM
         FN_BUILTIN fn = findBuiltin(funcName.value.str.value);
         check(fn !is null, "Builtin function not found");
 
-        HVMValue[16] staticBuffer; 
+        HVMValue[16] staticBuffer;
         HVMValue* args;
 
         if (argc <= 16)
@@ -403,7 +777,7 @@ struct HVM
 
         if (context !is null)
             free(context);
-
+        
         context = callStack[callStackSize].localContext;
         pc = callStack[callStackSize].retAddr;
         push(retVal);
@@ -414,7 +788,7 @@ struct HVM
     void opJz(uint addr)
     {
         HVMValue val = pop();
-        if (val.value.i1 == false)
+        if (toBool(val).value.i1 == false)
             pc = addr;
     }
 
@@ -423,7 +797,7 @@ struct HVM
     void opJnz(uint addr)
     {
         HVMValue val = pop();
-        if (val.value.i1 != false)
+        if (toBool(val).value.i1 != false)
             pc = addr;
     }
 
@@ -438,7 +812,9 @@ struct HVM
     pragma(mangle, "HVM_opEcho")
     void opEcho()
     {
-        printValue(pop());
+        HVMValue val = pop();
+        printValue(val);
+        release(val);
     }
 
     pragma(inline, true)
@@ -448,7 +824,13 @@ struct HVM
         HVMValue idx = pop();
         HVMValue val = pop();
         string key = cast(string) idx.value.str.value[0 .. idx.value.str.length];
+        HVMValue* old = context.get(key);
+        if (old !is null)
+            release(*old);
+
         context.put(key, val);
+
+        release(idx);
     }
 
     pragma(inline, true)
@@ -459,9 +841,16 @@ struct HVM
         string key = cast(string) idx.value.str.value[0 .. idx.value.str.length];
         HVMValue* val = context.get(key);
         if (val !is null)
+        {
+            retain(*val);
             push(*val);
+        }
         else
+        {
+            printf("Variable not found '%s'.\n", idx.value.str.value);
             push(HVMValue.init);
+        }
+        release(idx);
     }
 
     pragma(inline, true)
@@ -946,10 +1335,7 @@ struct HVM
     {
         if (idx > constantPoolSize || constantPoolSize == 0)
             error("The passed index exceeds the size of the constant map.");
-        if (stackSize == STACK_LIMIT)
-            error(
-                "The stack is already full to its maximum limit, it is not possible to perform a 'Loadk'.");
-        stack[stackSize++] = constantPool[idx];
+        push(constantPool[idx]);
     }
 }
 
@@ -969,12 +1355,12 @@ HVM* HVM_create(uint* program, uint programSize, HVMValue* constantPool, uint co
     vm.constantPoolSize = constantPoolSize;
     vm.clean = clean;
     vm.pc = 0;
+    vm.callStackSize = 0;
+    vm.stackAllc = 1024;
     vm.stackSize = 0;
-    vm.callStackSize = 0;
-    vm.STACK_LIMIT = 255;
-    vm.callStackSize = 0;
+    vm.stack = cast(HVMValue*) malloc(HVMValue.sizeof * vm.stackAllc);
 
-    for (uint i = 0; i < vm.STACK_LIMIT; i++)
+    for (uint i = 0; i < vm.stackAllc; i++)
         vm.stack[i] = HVMValue.init;
 
     vm.context = cast(HashMap!(string, HVMValue)*) malloc(HashMap!(string, HVMValue).sizeof);
@@ -1022,5 +1408,87 @@ void printValue(HVMValue val)
     default:
         printf("<err>");
         break;
+    }
+}
+
+pragma(inline, true)
+pragma(mangle, "HVM_retain")
+void retain(HVMValue v)
+{
+    if (v.type == HVMType.String && v.value.str.refCount !is null)
+        (*v.value.str.refCount)++;
+    else if (v.type == HVMType.Array && v.value.arr !is null && v.value.arr.refCount !is null)
+        (*v.value.arr.refCount)++;
+}
+
+pragma(inline, true)
+pragma(mangle, "HVM_release")
+void release(HVMValue v)
+{
+    if (v.type == HVMType.String && v.value.str.refCount !is null)
+    {
+        if (--(*v.value.str.refCount) == 0)
+        {
+            free(v.value.str.value);
+            free(v.value.str.refCount);
+        }
+    }
+    else if (v.type == HVMType.Array && v.value.arr !is null && v.value.arr.refCount !is null)
+    {
+        if (--(*v.value.arr.refCount) == 0)
+        {
+            HVMArray* arr = v.value.arr;
+            for (uint i = 0; i < arr.map.size(); i++) 
+                release(arr.map.data[i].value);
+            
+            free(arr.map.data);
+            free(arr.map.hashIdx);
+            free(arr.refCount);
+            free(arr);
+        }
+    }
+}
+
+pragma(inline, true)
+pragma(mangle, "HVM_valueToString")
+HVMString valueToString(HVMValue val)
+{
+    switch (val.type)
+    {
+    case HVMType.String:
+        return val.value.str;
+        
+    case HVMType.Int:
+        char* buf = cast(char*) malloc(21);
+        uint* counter = cast(uint*) malloc(uint.sizeof);
+        *counter = 1;
+        int len = sprintf(buf, "%lld", val.value.i32);
+        return HVMString(buf, len, counter);
+        
+    case HVMType.Float:
+        char* buf = cast(char*) malloc(32);
+        uint* counter = cast(uint*) malloc(uint.sizeof);
+        *counter = 1;
+        int len = sprintf(buf, "%g", val.value.f32);
+        return HVMString(buf, len, counter);
+        
+    case HVMType.Bool:
+        if (val.value.i1)
+        {
+            char* buf = cast(char*) malloc(2);
+            uint* counter = cast(uint*) malloc(uint.sizeof);
+            *counter = 1;
+            buf[0] = '1';
+            buf[1] = '\0';
+            return HVMString(buf, 1, counter);
+        }
+        else
+            return HVMString(cast(char*)"", 0, null);
+        
+    case HVMType.Array:
+        return HVMString(cast(char*)"Array", 5, null);
+        
+    default:
+        return HVMString(cast(char*)"", 0, null);
     }
 }

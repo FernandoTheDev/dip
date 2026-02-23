@@ -13,7 +13,7 @@ struct HashMap(K, V)
         bool deleted;
     }
 
-    private Entry* buckets;
+    Entry* buckets;
     private size_t capacity;
     private size_t length;
     private enum float LOAD_FACTOR = 0.75;
@@ -157,5 +157,19 @@ struct HashMap(K, V)
     {
         memset(buckets, 0, Entry.sizeof * capacity);
         length = 0;
+    }
+
+    pragma(inline, true)
+    void releaseAll() @nogc
+    {
+        import vm : release, HVMValue;
+        static if (is(V == HVMValue))
+        {
+            for (size_t i = 0; i < capacity; i++)
+            {
+                if (buckets[i].occupied && !buckets[i].deleted)
+                    release(buckets[i].value);
+            }
+        }
     }
 }

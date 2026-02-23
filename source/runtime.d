@@ -32,8 +32,6 @@ HVMValue fn_libffi_open(ref HVM vm, HVMValue* args, uint argc)
     HVMString name = args[0].value.str;
     char* lib = name.value;
     
-    // printf("LIB: '%s'\n", lib);
-    
     void* ptr = dlopen(lib, RTLD_LAZY);
     if (ptr is null)
     {
@@ -42,7 +40,6 @@ HVMValue fn_libffi_open(ref HVM vm, HVMValue* args, uint argc)
             return HVMValue.makeInt(-1);
     }
     
-    // printf("OK - library loaded\n");
     LIBS[0] = ptr;
     
     return HVMValue.makeInt(0);
@@ -56,14 +53,6 @@ HVMValue fn_libffi_call(ref HVM vm, HVMValue* args, uint argc)
     HVMString sym = args[1].value.str;
     char* fnName = sym.value;
     
-    // if (libName !in LIBS)
-    // {
-    //     printf("ERROR: Library '%s' not loaded\n", libStr.value);
-    //     return HVMValue.makeBool(false);
-    // }
-    
-    // printf("SYM: %s from %lld\n", fnName, lib);
-    
     FN_FFI fn = cast(FN_FFI) dlsym(LIBS[lib], fnName);
     if (fn is null)
     {
@@ -72,7 +61,6 @@ HVMValue fn_libffi_call(ref HVM vm, HVMValue* args, uint argc)
         return HVMValue.makeBool(false);
     }
     
-    // printf("OK2 - calling %s\n", fnName);
     HVMValue val = fn(&vm, args + 2, argc - 2);
     return val;
 }
@@ -90,6 +78,13 @@ HVMValue fn_vm_pop(ref HVM vm, HVMValue* args, uint argc)
     return vm.pop();
 }
 
+HVMValue fn_count(ref HVM vm, HVMValue* args, uint argc)
+{
+    check(argc == 1, "count() expects 1 argument.");
+    check(args[0].type == HVMType.Array, "count() expects an array.");
+    return HVMValue.makeInt(args[0].value.arr.map.size());
+}
+
 struct BuiltinFn
 {
     const char* name;
@@ -103,6 +98,7 @@ const BuiltinFn[] BUILTINS = [
     BuiltinFn("libffi_call", &fn_libffi_call),
     BuiltinFn("libffi_cleanup", &fn_libffi_cleanup),
     BuiltinFn("__vm_pop", &fn_vm_pop),
+    BuiltinFn("count", &fn_count),
 ];
 
 FN_BUILTIN findBuiltin(char* name)

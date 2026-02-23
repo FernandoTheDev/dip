@@ -11,8 +11,7 @@ typedef enum {
     HVMType_Int,
     HVMType_Float,
     HVMType_String,
-    HVMType_HashTable,
-    HVMType_Object,
+    HVMType_Array,
 } HVMType;
 
 // Structs
@@ -21,8 +20,7 @@ typedef struct {
     uint32_t length;
 } HVMString;
 
-typedef struct {} HVMHashTable;
-typedef struct {} HVMObject;
+typedef struct {} HVMArray;
 
 typedef union {
     int64_t i32;
@@ -30,8 +28,7 @@ typedef union {
     bool i1;
     double f32;
     HVMString str;
-    HVMHashTable ht;
-    HVMObject obj;
+    HVMArray ht;
 } HVMLiteral;
 
 typedef struct {

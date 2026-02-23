@@ -5,7 +5,5 @@ function fibo($n) {
     return fibo($n - 2) + fibo($n - 1);
 }
 
-echo "fibo(10): ";
-echo fibo(10);
-echo "\n";
+echo "fibo(10): " . fibo(10) . "\n";
 
